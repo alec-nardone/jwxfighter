@@ -56,6 +56,7 @@ const FS = Object.freeze({
 const GS = Object.freeze({
   TITLE_SCREEN: 'TITLE_SCREEN',
   CHARACTER_SELECT: 'CHARACTER_SELECT',
+  LEVEL_SELECT: 'LEVEL_SELECT',
   VS_SCREEN: 'VS_SCREEN',
   ROUND_INTRO: 'ROUND_INTRO',
   FIGHTING: 'FIGHTING',
@@ -66,6 +67,10 @@ const GS = Object.freeze({
   GAME_OVER: 'GAME_OVER',
   ENDING: 'ENDING',
 });
+
+// Cheat / demo toggles (set via title screen)
+let godMode = false;
+let levelSelectEnabled = false;
 
 // Frame data for normal moves: { startup, active, recovery, damage, stun, knockbackX, knockbackY, type }
 const FRAME_DATA = Object.freeze({
@@ -1270,11 +1275,12 @@ class Fighter {
     if (this.stateFrame < fd.startup) return null;
     if (this.stateFrame >= fd.startup + fd.active) return null;
     const dir = this.facingRight ? 1 : -1;
+    const godMult = (godMode && this === player1) ? 10 : 1;
     return {
       x: this.x + fd.hitboxX * dir - (dir < 0 ? fd.hitboxW : 0),
       y: this.y - 40 + (fd.hitboxY || 0),
       w: fd.hitboxW, h: fd.hitboxH,
-      damage: fd.damage * this.attackMult * (this.powerUp > 0 ? 1.5 : 1),
+      damage: fd.damage * this.attackMult * (this.powerUp > 0 ? 1.5 : 1) * godMult,
       stun: fd.stun,
       knockbackX: fd.knockbackX * dir,
       knockbackY: fd.knockbackY || 0,
@@ -1290,6 +1296,12 @@ class Fighter {
   }
 
   takeHit(hitbox, attackerX, comboScaling) {
+    // God mode: player1 is invincible — no damage, no knockback, no hit stun
+    if (godMode && this === player1) {
+      this.hitFlash = 4;
+      this.superMeter = Math.min(100, this.superMeter + 8);
+      return 0;
+    }
     const scaling = comboScaling || 1;
     const dmg = Math.round(hitbox.damage * scaling);
     this.hp = Math.max(0, this.hp - dmg);
@@ -1308,6 +1320,7 @@ class Fighter {
   }
 
   takeChipDamage(amount) {
+    if (godMode && this === player1) return;
     this.hp = Math.max(0, this.hp - Math.round(amount));
   }
 }
@@ -1997,6 +2010,15 @@ function updateTitleScreen(dt) {
     s.x += s.speed;
     if (s.x > CANVAS_W) s.x = 0;
   }
+  // Cheat toggles
+  if (justPressed['g'] || justPressed['G']) {
+    godMode = !godMode;
+    SFX.cursorMove();
+  }
+  if (justPressed['v'] || justPressed['V']) {
+    levelSelectEnabled = !levelSelectEnabled;
+    SFX.cursorMove();
+  }
   if (justPressed['Enter'] || justPressed[' ']) {
     SFX.cursorConfirm();
     setGameState(GS.CHARACTER_SELECT);
@@ -2037,6 +2059,20 @@ function renderTitleScreen(ctx) {
   if (stateTimer > 80 && frameCount % 60 < 40) {
     ctx.fillStyle = '#AAA'; ctx.font = '10px monospace';
     ctx.fillText('PRESS ENTER TO START', titleX, CANVAS_H / 2 + 30);
+  }
+
+  // Cheat toggles (god mode + level select) — small row just above controls panel
+  if (stateTimer > 40) {
+    ctx.font = 'bold 8px monospace'; ctx.textAlign = 'center';
+    const tY = CANVAS_H / 2 + 48;
+    const drawToggle = (label, key, on, x, y) => {
+      ctx.fillStyle = '#888'; ctx.fillText(`[${key}]`, x - 56, y);
+      ctx.fillStyle = '#FFD700'; ctx.fillText(label, x - 14, y);
+      ctx.fillStyle = on ? '#00FF66' : '#555';
+      ctx.fillText(on ? 'ON' : 'OFF', x + 40, y);
+    };
+    drawToggle('GOD MODE',     'G', godMode,            titleX - 90, tY);
+    drawToggle('LEVEL SELECT', 'V', levelSelectEnabled, titleX + 90, tY);
   }
 
   // Controls panel
@@ -2094,7 +2130,11 @@ function updateCharacterSelect(dt) {
     // Transition timer
     if (stateTimer > 30) {
       const opponentOrder = buildGauntlet(selectedChar);
-      setGameState(GS.VS_SCREEN, { p1Char: selectedChar, opponents: opponentOrder, fightIndex: 0 });
+      if (levelSelectEnabled) {
+        setGameState(GS.LEVEL_SELECT, { p1Char: selectedChar, opponents: opponentOrder, fightIndex: 0 });
+      } else {
+        setGameState(GS.VS_SCREEN, { p1Char: selectedChar, opponents: opponentOrder, fightIndex: 0 });
+      }
     }
     return;
   }
@@ -2230,6 +2270,106 @@ function buildGauntlet(playerCharIdx) {
   order.push(mirrorChar); // Fight 7: mirror
   order.push(CHAR.HELLO); // Fight 8: boss
   return order;
+}
+
+// Level select (shown only when the title-screen toggle is ON)
+let levelSelectCursor = 0;
+
+function updateLevelSelect(dt) {
+  const sd = stateData;
+  const count = sd.opponents.length;
+  if (justPressed['ArrowLeft'] || justPressed['a'] || justPressed['A']) {
+    levelSelectCursor = (levelSelectCursor + count - 1) % count; SFX.cursorMove();
+  }
+  if (justPressed['ArrowRight'] || justPressed['d'] || justPressed['D']) {
+    levelSelectCursor = (levelSelectCursor + 1) % count; SFX.cursorMove();
+  }
+  if (justPressed['ArrowUp'] || justPressed['w'] || justPressed['W']) {
+    levelSelectCursor = Math.max(0, levelSelectCursor - 4); SFX.cursorMove();
+  }
+  if (justPressed['ArrowDown'] || justPressed['s'] || justPressed['S']) {
+    levelSelectCursor = Math.min(count - 1, levelSelectCursor + 4); SFX.cursorMove();
+  }
+  if (justPressed['Escape']) {
+    SFX.cursorMove();
+    setGameState(GS.TITLE_SCREEN);
+    return;
+  }
+  if (justPressed['Enter'] || justPressed[' ']) {
+    SFX.cursorConfirm();
+    sd.fightIndex = levelSelectCursor;
+    setGameState(GS.VS_SCREEN, sd);
+  }
+}
+
+function renderLevelSelect(ctx) {
+  ctx.fillStyle = '#0A0A1A'; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Title
+  ctx.fillStyle = (frameCount % 40 < 20) ? '#FFD700' : '#FFF';
+  ctx.font = 'bold 16px monospace'; ctx.textAlign = 'center';
+  ctx.fillText('\u2605  LEVEL SELECT  \u2605', CANVAS_W / 2, 26);
+
+  ctx.fillStyle = '#888'; ctx.font = '8px monospace';
+  ctx.fillText('Arrows/WASD to pick    ENTER to jump    ESC to go back', CANVAS_W / 2, 42);
+
+  const sd = stateData;
+  const count = sd.opponents.length;
+  const cols = 4;
+  const rows = Math.ceil(count / cols);
+  const tileW = 108, tileH = 88, gap = 8;
+  const gridW = cols * tileW + (cols - 1) * gap;
+  const gridX = Math.max(6, (CANVAS_W - gridW) / 2);
+  const gridY = 58;
+
+  for (let i = 0; i < count; i++) {
+    const r = Math.floor(i / cols), c = i % cols;
+    const tx = gridX + c * (tileW + gap);
+    const ty = gridY + r * (tileH + gap);
+    const opIdx = sd.opponents[i];
+    const ch = CHARACTERS[opIdx];
+    const isBoss = opIdx === CHAR.HELLO;
+    const isHover = i === levelSelectCursor;
+
+    ctx.fillStyle = isBoss ? '#1A0010' : '#111';
+    ctx.fillRect(tx, ty, tileW, tileH);
+    ctx.lineWidth = isHover ? 3 : 1;
+    if (isHover) {
+      ctx.strokeStyle = `hsl(${(frameCount * 4) % 360},80%,60%)`;
+    } else {
+      ctx.strokeStyle = isBoss ? '#FF3355' : (ch.colors.accent || '#555');
+    }
+    ctx.strokeRect(tx, ty, tileW, tileH);
+
+    // Fight number (top center)
+    ctx.textAlign = 'center';
+    ctx.fillStyle = isBoss ? '#FF3355' : '#FFD700';
+    ctx.font = 'bold 9px monospace';
+    ctx.fillText(isBoss ? `FIGHT ${i + 1} — BOSS` : `FIGHT ${i + 1}`, tx + tileW / 2, ty + 12);
+
+    // Sprite
+    ctx.save();
+    ctx.translate(tx + tileW / 2, ty + tileH / 2 + 6);
+    ctx.scale(0.75, 0.75);
+    BODY_RENDERERS[opIdx](ctx, 0, -18, 40, 36, frameCount, FS.IDLE);
+    ctx.restore();
+
+    // Name
+    ctx.fillStyle = '#FFF';
+    ctx.font = 'bold 9px monospace';
+    ctx.fillText(ch.name, tx + tileW / 2, ty + tileH - 16);
+
+    // Stage name
+    const stIdx = Math.min(i, STAGES.length - 1);
+    ctx.fillStyle = '#888';
+    ctx.font = '7px monospace';
+    ctx.fillText(STAGES[stIdx].name, tx + tileW / 2, ty + tileH - 5);
+  }
+
+  // Footer hint
+  ctx.fillStyle = '#00FF66'; ctx.font = '8px monospace'; ctx.textAlign = 'center';
+  const gm = godMode ? 'ON' : 'OFF';
+  ctx.fillText(`GOD MODE: ${gm}`, CANVAS_W / 2, CANVAS_H - 10);
 }
 
 function renderVSScreen(ctx) {
@@ -2412,6 +2552,10 @@ function setGameState(newState, data) {
       break;
     case GS.CHARACTER_SELECT:
       selectCursorX = 0; selectCursorY = 0; selectedChar = -1;
+      playTrack(TRACK_SELECT);
+      break;
+    case GS.LEVEL_SELECT:
+      levelSelectCursor = (stateData && stateData.fightIndex) || 0;
       playTrack(TRACK_SELECT);
       break;
     case GS.VS_SCREEN:
@@ -2721,6 +2865,9 @@ function gameLoop(timestamp) {
     case GS.CHARACTER_SELECT:
       updateCharacterSelect(dt);
       break;
+    case GS.LEVEL_SELECT:
+      updateLevelSelect(dt);
+      break;
     case GS.VS_SCREEN:
       if (stateTimer > 90) {
         const sd = stateData;
@@ -2884,6 +3031,9 @@ function gameLoop(timestamp) {
       break;
     case GS.CHARACTER_SELECT:
       renderCharacterSelect(ctx);
+      break;
+    case GS.LEVEL_SELECT:
+      renderLevelSelect(ctx);
       break;
     case GS.VS_SCREEN:
       renderVSScreen(ctx);
